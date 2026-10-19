@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PM5 Test</title>
+<style>
+  :root { --bg: #fff; --fg: #111; --muted: #666; --line: #ddd; --accent: #0b6bcb; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; --line: #333; --accent: #5aa9ff; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif; }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 16px; }
+  button { display: block; width: 100%; padding: 14px; margin: 0 0 10px; font-size: 1rem; border: 1px solid var(--line);
+           border-radius: 8px; background: var(--bg); color: var(--fg); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .4; }
+  #state, #live { font-weight: 600; margin-bottom: 12px; }
+  #log { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; border-top: 1px solid var(--line); padding-top: 8px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>PM5 test</h1>
+<p>Open in Chrome on Android. Turn the PM5 on, then tap Connect and pick it from the list.</p>
+
+<div id="state">Not connected</div>
+<button id="connect" class="primary">Connect to PM5</button>
+<button class="send" data-workout="2000m" disabled>Send 2000m (500m splits)</button>
+<button class="send" data-workout="500m-intervals" disabled>Send 500m / 1:00 rest intervals (repeat until stopped)</button>
+<button class="send" data-workout="4x500m" disabled>Send 4 × 500m / 1:00 rest (experimental)</button>
+<div id="live"></div>
+<div id="log"></div>
+
+<script src="vendor/ergometer.min.js"></script>
+<script>
+// Numeric values of ErgometerJS const enums (they are not present at runtime).
+const WorkoutType = { fixedDistanceSplits: 3, fixedDistanceInterval: 7, variableInterval: 8 };
+const IntervalType = { distance: 1 };
+const DurationType = { distance: 128 };
+const Screen = { workout: 1, prepareToRow: 1 };
+const StateNames = ['inactive', 'device ready', 'scanning', 'connecting', 'connected', 'services found', 'ready'];
+
+const pm = new ergometer.PerformanceMonitorBle();
+const $ = (s) => document.querySelector(s);
+
+function log(text) {
+  $('#log').textContent = new Date().toLocaleTimeString() + '  ' + text + '\n' + $('#log').textContent;
+}
+
+pm.logEvent.sub(this, (text) => log(text));
+pm.connectionStateChangedEvent.sub(this, (oldState, newState) => {
+  $('#state').textContent = 'PM5: ' + (StateNames[newState] || newState);
+  const ready = newState === 6;
+  document.querySelectorAll('.send').forEach((b) => (b.disabled = !ready));
+});
+pm.rowingGeneralStatusEvent.sub(this, (s) => {
+  $('#live').textContent = `Distance ${s.distance.toFixed(0)} m · Time ${s.elapsedTime.toFixed(1)} s · Drag ${s.dragFactor}`;
+});
+
+$('#connect').addEventListener('click', async () => {
+  if (!navigator.bluetooth) {
+    log('This browser has no Web Bluetooth. Use Chrome on Android or desktop.');
+    return;
+  }
+  try {
+    // On the web, startScan opens Chrome's device picker; returning true connects to the chosen PM5.
+    await pm.startScan(() => true);
+  } catch (e) {
+    log('Connect failed: ' + (e && e.message ? e.message : e));
+  }
+});
+
+// Each command goes in its own buffer: Web Bluetooth packets are only 20 bytes.
+async function sendEach(builders) {
+  for (const build of builders) await build(pm.newCsafeBuffer()).send();
+}
+
+const prepare = (b) => b.setScreenState({ screenType: Screen.workout, value: Screen.prepareToRow });
+const configure = (b) => b.setConfigureWorkout({ programmingMode: true });
+
+const workouts = {
+  '2000m': () => sendEach([
+    (b) => b.setWorkoutType({ value: WorkoutType.fixedDistanceSplits }),
+    (b) => b.setWorkoutDuration({ value: 2000, durationType: DurationType.distance }),
+    (b) => b.setSplitDuration({ value: 500, durationType: DurationType.distance }),
+    configure,
+    prepare,
+  ]),
+  '500m-intervals': () => sendEach([
+    (b) => b.setWorkoutType({ value: WorkoutType.fixedDistanceInterval }),
+    (b) => b.setWorkoutDuration({ value: 500, durationType: DurationType.distance }),
+    (b) => b.setRestDuration({ value: 60 }),
+    configure,
+    prepare,
+  ]),
+  // Variable intervals: one block of commands per interval, numbered from 0.
+  '4x500m': () => {
+    const steps = [];
+    for (let i = 0; i < 4; i++) {
+      steps.push((b) => b.setWorkoutIntervalCount({ value: i }));
+      if (i === 0) steps.push((b) => b.setWorkoutType({ value: WorkoutType.variableInterval }));
+      steps.push((b) => b.setIntervalType({ value: IntervalType.distance }));
+      steps.push((b) => b.setWorkoutDuration({ value: 500, durationType: DurationType.distance }));
+      steps.push((b) => b.setRestDuration({ value: 60 }));
+      steps.push(configure);
+    }
+    steps.push(prepare);
+    return sendEach(steps);
+  },
+};
+
+document.querySelectorAll('.send').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const name = btn.dataset.workout;
+    log('Sending ' + name + '…');
+    try {
+      await workouts[name]();
+      log('Sent ' + name + '. Check the PM5 screen.');
+    } catch (e) {
+      log('Send failed: ' + (e && e.message ? e.message : e));
+    }
+  });
+});
+</script>
+</body>
+</html>
